@@ -1,0 +1,232 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage[margin=24mm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\graphicspath{{figuras/}}
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+\newcommand{\codigo}[1]{\texttt{#1}}
+\newcommand{\figrel}[2]{\par\medskip\begin{center}\includegraphics[width=.97\linewidth,height=.67\textheight,keepaspectratio]{#1}\par\smallskip\small #2\end{center}\medskip}
+\title{Gate 5 da pesquisa SRM\\Aprendizado profundo para diagnóstico a partir de correntes trifásicas}
+\author{Relatório técnico de continuidade da campanha SRM}
+\date{22 de novembro de 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+O Gate 5 investigou representações tempo--frequência, transferência de aprendizado, ajuste seletivo, ablação de fases, controles sem pré-treino, uma CNN unidimensional, fusão de atributos, expansão de dados, robustez e interpretabilidade. Foram executados E01 a E12, incluindo as rodadas de expansão e robustez. O E12 compara cinco métodos em replay causal e mede o custo por janela em CPU. O fechamento científico e a aprovação para o Gate 6 cabem ao pesquisador. O híbrido ABC com perturbação AWGN no treino é candidato para o Gate 6. Um controle com o relógio absoluto separou todas as janelas puras da validação. Esse resultado limita a interpretação das métricas nominais e orienta o desenho de uma avaliação com trajetórias independentes.
+\end{abstract}
+\tableofcontents
+\clearpage
+
+\section{Escopo, dados e força da evidência}
+O problema avaliado é a discriminação de segmentos delimitados por um marcador de evento em correntes A/B/C de um motor de relutância chaveada simulado. A classe positiva designa o pós-evento. Pré e pós são proxies temporais. A campanha carece de referência saudável independente e confirmação de subclasses físicas de falha. Os rótulos, portanto, sustentam a comparação de métodos no cenário simulado.
+
+O Gate 4 identificou retenção em blocos de oito na grade regular de 200 kHz. A corrente canônica de 25 kHz retém a sequência de valores distintos na grade de atualização, com Nyquist de 12,5 kHz. O período de recorrência usado no Gate 5 é aproximadamente 13,08 ms, ou 327 amostras. Ele caracteriza a recorrência medida, sem atribuição à frequência física de chaveamento. O Gate 4 também relatou identidade exata no suporte pré-evento comum em registros de desenvolvimento. A expansão perturba as mesmas trajetórias e amplia a diversidade computacional. Novas condições físicas exigem novos dados ou simulações independentes.
+
+\begin{center}
+\begin{tabular}{@{}lp{.76\linewidth}@{}}\toprule
+Partição & Registros de origem\\\midrule
+Treino & R01, R02, R04, R05, R07, R08, R10, R11\\
+Validação & R03, R09\\
+Teste reservado & R06, R12\\\bottomrule
+\end{tabular}
+\end{center}
+
+Janelas e variantes herdam a partição da origem. Os tensores recebem apenas correntes ou espectrogramas. Identificadores, índice absoluto, marcador, família e posição do evento servem ao manifesto e à análise. O E11 usa relógio explicitamente apenas como controle separado. A validação foi consultada reiteradamente, então seu papel é exploratório. Janelas com salto de 41 pontos se sobrepõem substancialmente, e 576 janelas em dois registros correspondem a duas origens de validação. As faixas de sensibilidade a ruído quantificam variação condicional nessas origens.
+
+As fontes deste relatório são os registros da campanha, scripts, manifestos, logs e arquivos de métricas. O apêndice tabula automaticamente as métricas agregadas em disco. Os JSON originais, com séries, parâmetros, resultados por origem e realizações, acompanham o código LaTeX. Os arquivos proprietários de corrente e os checkpoints ficam no ambiente local. O conjunto reservado permaneceu fora dos experimentos aqui descritos.
+
+\section{E01: ambiente e teste de execução}
+O inventário identificou Intel Core i5-1335U com 12 processadores lógicos, 15,7 GiB de RAM utilizável, cerca de 4,3 GiB disponíveis durante a coleta, Intel Iris Xe integrada e cerca de 132 GiB livres. Usou-se CPU, Python 3.13 de 64 bits, PyTorch 2.13.0+cpu, torchvision 0.28.0+cpu, NumPy 2.5.5 e, a partir do carregador E04, SciPy 1.18.1. Os pacotes foram instalados em ambiente virtual local. O \codigo{pip check} passou.
+
+O teste sintético instanciou \codigo{resnet18(weights=None)} em avaliação, com quatro threads, um tensor de dimensão $1\times3\times224\times224$ e saída com mil valores finitos. Após três aquecimentos, a mediana de dez inferências foi 29,74 ms. A medida caracteriza somente o ensaio sintético de inferência. A aquisição, STFT, normalização, política de alarmes, custo de treino e desempenho do pipeline completo requerem medições próprias.
+
+\section{E02: escolha experimental da STFT}
+Para um segmento que termina na amostra $d$, os quadros têm comprimento $L$, salto $H=41$ e terminam em $d,d-H,d-2H,\ldots$, respeitando o suporte. Com a Hann simétrica $w[n]=\tfrac12(1-\cos(2\pi n/(L-1)))$, o espectro de cada fase em um quadro iniciado em $a$ é
+\[
+ X_{a,k}=\sum_{n=0}^{L-1}x[a+n]w[n]e^{-2\pi i kn/N_{\rm FFT}}.
+\]
+A magnitude unilateral é $|X_{a,k}|/\sum_n w[n]$, duplicada nos bins internos. DC e Nyquist conservam seu peso. Com $N_{\rm FFT}=1024$, obtemos 513 bins, espaçados de 24,414 Hz. O preenchimento por zeros densifica o eixo e a resolução física continua ligada à janela. O salto é 1,64 ms. O espectrograma de amplitude em ampères pode ser convertido para $20\log_{10}(A/1\,\mathrm{A})$ com piso antes do logaritmo.
+
+\begin{center}
+\begin{tabular}{@{}rrrrl@{}}\toprule
+$L$ & Duração (ms) & Pico (Hz) & Primeiro quadro pós (ms) & Separou 1,0 e 1,2 kHz\\\midrule
+164 & 6,56 & 1000,98 & 6,60 & Não\\
+327 & 13,08 & 1000,98 & 13,12 & Sim\\
+654 & 26,16 & 1000,98 & 26,20 & Sim\\\bottomrule
+\end{tabular}
+\end{center}
+Dobrar a amplitude acrescentou 6,02 dB. Alterar amostras posteriores à decisão preservou quadros anteriores ao degrau no teste sintético. A janela de 327 amostras melhora a discriminação dos tons do ensaio. O custo temporal aumenta e a quantidade de quadros depende do segmento. O primeiro quadro inteiramente posterior depende do alinhamento do relógio e é uma medida de cobertura, distinta do primeiro alarme.
+
+Em R01 e R04, a verificação local usou segmento de 654 amostras com janela de 164 e segmento de 981 com janela de 327. Com o evento no meio, as contagens pré/cruzado/pós foram 4/4/4 e 4/8/4. Para a janela curta, o pico espectral mediano em B passou de 15,0 para 28,9 A em R01 e de 11,1 para 33,4 A em R04. Para a longa, passou de 17,5 para 65,0 A e de 17,4 para 70,8 A. Como os suportes pós diferem, a maior magnitude na configuração longa não identifica superioridade. Com o marcador em 75\% do recorte, nenhuma das duas ofereceu quadro totalmente pós nessa prova. Isso motivou um relógio de decisão fixo para os tensores do E03.
+
+\section{E03: segmentos, rótulos e exportação}
+Cada origem canônica contém 13.750 amostras. Com índices a partir de zero, os fins seguem $980,1021,1062,\ldots\le13749$, totalizando 312 instantes por origem. Para um comprimento $n$, o começo é $d-n+1$. O evento é arredondado para a primeira amostra da grade em ou após o marcador. O segmento é pré se $d<e$, pós se $d-n+1\ge e$ e cruzado nos demais casos. A comparação pareada retém instantes em que ambos os comprimentos têm o mesmo rótulo puro.
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}\toprule
+Partição & Pré puro & Pós puro & Cruzado em ao menos um braço & Total\\\midrule
+Treino & 564 & 1741 & 191 & 2496\\
+Validação & 141 & 435 & 48 & 624\\
+Total & 705 & 2176 & 239 & 3120\\\bottomrule
+\end{tabular}
+\end{center}
+Os tensores individuais têm ordens fase, quadro, frequência e formas $3\times12\times513$ e $3\times16\times513$. O último quadro termina na amostra de decisão. A verificação em memória conferiu dimensões, valores finitos, alinhamento com o manifesto e invariância a perturbação posterior em um teste sintético. O Octave exportou uma dupla de matrizes por origem. Foram geradas 6.240 imagens para inspeção humana, duas por instante, reunindo A/B/C lado a lado. A escala visual fixa de $-60$ a $+40$ dB exibe os painéis, com frequência crescente de baixo para cima. Os modelos usam magnitude numérica.
+
+\section{E04: primeiro ensaio de transferência}
+O carregador confrontou os índices \codigo{stop}, as formas e os rótulos com o manifesto. Lotes contendo um pré e um pós passaram pela ResNet-18 com inicialização aleatória em ambas as partições. A entrada usou ordem lote, canal, frequência, tempo. A saída finita de $2\times1000$ comprovou a integração da arquitetura. A transferência propriamente dita usou \codigo{ResNet18\_Weights.IMAGENET1K\_V1}.
+
+Para cada entrada, converteu-se magnitude em dB re 1 A, limitou-se o intervalo a $[-60,40]$ e mapeou-se afim para $[0,1]$. O redimensionamento bilinear com antialiasing levou a $128\times64$. A correspondência A/B/C ocupa os três canais da rede, seguida da normalização ImageNet por canal. O redimensionamento reduz a densidade no eixo de frequência e interpola o eixo temporal. Ele é parte do protocolo deste piloto.
+
+Um bloco residual tem a forma $y=\phi(F(x)+S(x))$, com $S$ identidade ou projeção quando as dimensões mudam. O agrupamento espacial ao final do extrator fornece 512 valores. A cabeça linear produz $z=w^\top h+b$, com decisão pós quando $z\ge0$. Na perda de treino, a contribuição positiva foi ponderada por $564/1741$. O ajuste usou AdamW, taxa 0,001, decaimento 0,01, lotes de 64, semente 501 e 20 épocas. Os pesos do extrator e as estatísticas de BatchNorm ficaram fixos. A logloss de validação é a entropia cruzada binária sem o peso de classe.
+
+As duas configurações acertaram 435 pós e 141 pré, com F1 de 1. A logloss foi 0,004369 em dois ciclos e 0,004164 em três. Em R03, dois ciclos tiveram menor perda. Em R09, três ciclos tiveram menor perda. Assim, o resultado agregado pequeno não definiu a escolha de comprimento.
+
+\section{E05: ajuste seletivo}
+O E05 reproduziu as decisões e a logloss do E04 na época zero. Liberou os parâmetros convolucionais do estágio \codigo{layer4} e a cabeça. Os parâmetros e estatísticas de BatchNorm ficaram fixos, e as demais camadas não receberam gradientes. O ajuste de três épocas usou AdamW, taxas $10^{-5}$ e $10^{-4}$ para estágio e cabeça, respectivamente, e lotes de 16.
+
+F1 permaneceu 1 em todas as épocas. A logloss final foi $7{,}25\times10^{-7}$ em dois ciclos e $9{,}93\times10^{-7}$ em três ciclos. A diferença nas probabilidades não alterou as decisões no limiar de 0,5. A escala linear da figura comprime os valores das épocas 1--3. A redução de logloss nas mesmas origens tampouco estabelece superioridade sob outros regimes. A campanha prosseguiu com ajuste seletivo documentado e sem ajuste integral a partir de ImageNet.
+
+\section{E06: ablação das fases}
+Para A, B, C, AC e ABC, uma nova cabeça foi treinada com o mesmo extrator congelado. Uma fase ausente recebeu zero depois da normalização, mantendo a posição dos canais. É uma comparação de modelos treinados para cada disponibilidade. A avaliação de um modelo ABC forçado a operar após uma falha aparece no E10.
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}\toprule
+Canais & FN 2 ciclos & FN 3 ciclos & Logloss 2 ciclos & Logloss 3 ciclos\\\midrule
+A & 1 & 0 & 0,03199 & 0,00772\\
+B & 0 & 0 & 0,00113 & 0,00190\\
+C & 2 & 0 & 0,05465 & 0,03344\\
+AC & 1 & 0 & 0,02796 & 0,01233\\
+ABC & 0 & 0 & 0,00437 & 0,00416\\\bottomrule
+\end{tabular}
+\end{center}
+Todos tiveram zero FP. B foi a melhor entrada isolada no cenário nominal. AC preservou as decisões de ABC com três ciclos e perdeu uma janela em R03 com dois. A comparação sustenta testar AC como alternativa quando B falta. A fusão com ramos independentes por fase ficou como possibilidade não executada.
+
+\section{E07: controles sem pré-treino e CNN 1D}
+\paragraph{E07.1.} A ResNet-18 congelada com pesos aleatórios foi repetida com sementes 501, 502 e 503. A cabeça seguiu o mesmo protocolo e usou os mesmos exemplos do E04. Para dois ciclos houve 3, 17 e 18 omissões. Para três ciclos houve 0, 3 e 3. Nenhum FP apareceu. A logloss média aleatória foi 0,32616 e 0,30570, aproximadamente 74 vezes a obtida com ImageNet. A comparação isola a inicialização no protocolo de extrator fixo.
+
+\paragraph{E07.2.} A ResNet-18 inicializada aleatoriamente atualizou todos os parâmetros por cinco épocas, com AdamW a 0,0003, lote 16 e semente 501. As duas entradas chegaram a F1 de 1 desde a primeira época. Na quinta, a logloss foi $3{,}865\times10^{-5}$ e $3{,}313\times10^{-5}$. O pré-treino congelado foi superado em logloss por esse protocolo integral. O E05 ainda teve menor logloss no cenário nominal. A comparação integral ImageNet versus integral aleatória com mesmo orçamento não foi executada.
+
+\paragraph{E07.3.} A CNN 1D recebeu correntes ABC a 25 kHz. Cada fase foi normalizada por média e desvio fixos ajustados sobre janelas de treino. A rede usa convoluções com 32, 64 e 128 canais, kernels de 15, 9 e 7 pontos, passo 2, BatchNorm/ReLU, média global e cabeça binária. Tem 77.793 parâmetros. Foram cinco épocas com AdamW, lote 16 e taxa 0,0003. F1 foi 1 nos dois comprimentos em todas as épocas. A logloss final foi 0,003106 e 0,003435. A rede 1D dispensa a STFT e é candidata compacta. O contraste com a ResNet-18 altera arquitetura e representação, e o custo de processamento de ponta a ponta permanece pendente.
+
+\section{E08: fusão com estatísticas}
+Para cada fase $p$, usaram-se $r_p=\sqrt{N^{-1}\sum_n i_p[n]^2}$ e fator de crista $\max_n|i_p[n]|/\max(r_p,\epsilon)$. Os dois globais são $r_{ABC}=\sqrt{(r_A^2+r_B^2+r_C^2)/3}$ e $100\,s(r_A,r_B,r_C)/\bar r$, com desvio amostral no numerador e piso no denominador. O modelo estatístico recebe oito descritores. O CNN recebe 512 valores e o híbrido 520. Cada bloco é padronizado com média e desvio ajustados no treino. A padronização do embedding diferencia este braço CNN do E04. As cabeças usam a mesma família linear e o mesmo procedimento de ajuste.
+
+Em dois ciclos, o método estatístico teve 26 omissões, a CNN teve duas e o híbrido uma, todas as omissões da CNN e do híbrido concentradas em R09. Os três tiveram FP zero. As perdas foram 0,22263, 0,01865 e 0,01461. A logloss híbrida caiu 21,6\% em relação à CNN do próprio E08. A contribuição em decisões foi de uma janela. Estes oito descritores são uma seleção simples para este piloto. O K8 histórico do Gate 3, que contém bandas acima do Nyquist canônico, não foi portado literalmente.
+
+\section{E09: expansão, famílias e volume}
+O princípio foi manter a linhagem de origem e comparar a mesma janela limpa com sua correspondente perturbada. Uma substituição mantém o número de janelas e atualizações. A comparação de volume usa repetição limpa pareada como controle. As conclusões dependem da perturbação, intensidade, realização e partições utilizadas.
+
+\paragraph{E09.1: AWGN a 25 kHz.} A primeira comparação manteve 2.305 janelas, substituindo aproximadamente metade no braço misto. A 30 dB, a CNN passou de 425 para quatro omissões e o híbrido de 423 para duas, ambos com FP zero no braço misto. Em condição limpa, o híbrido passou de uma para três omissões. O braço puramente estatístico manteve 26 omissões e FP zero em todas as condições. Esse contraste separou a estabilidade de descritores de amplitude do efeito da exposição da CNN às perturbações espectrais.
+
+\paragraph{E09.2: proporção.} As doses de treino foram 0, 288, 576, 864 e 1.152 substituições. Os subconjuntos eram aninhados e estratificados por origem, classe e dose. A 30 dB, o híbrido teve 423, 3, 3, 3 e 2 omissões, respectivamente. Em limpo, 1, 2, 3, 3 e 3. Todos os braços com ruído tiveram FP zero nas condições avaliadas. Fixou-se 288 como referência econômica para as rodadas seguintes.
+
+\paragraph{E09.3: ganho independente.} Os mesmos 288 instantes receberam ganho ou AWGN. Para ganho, $i'_p=g_pi_p$ com fatores do catálogo e limites nominais de 1\%, 5\% e 10\%. O treino com ganho preservou as contagens do treino canônico inclusive sob o ganho validado. A logloss caiu ligeiramente. A 30 dB de AWGN, o híbrido treinado com ganho permaneceu em 423 omissões e um FP, enquanto o treino AWGN teve três omissões e zero FP.
+
+\paragraph{E09.4 e E09.5: deformação temporal.} Nos 80 registros catalogados da família C, o marcador permaneceu fixo e compressões recortaram até 78 amostras no início e 196 no fim. O suporte deve ser tratado em tempo absoluto, com $t'=t_e+\alpha(t-t_e)$. O máximo deslocamento nominal foi 7,97 ms. O E09.5 comparou os mesmos relógios no suporte comum e usou 288 substituições. A compensação pelo mapa de tempo fez a mediana do NRMSE de C07 cair de cerca de 95,98\% para aproximadamente zero. Em C08, caiu de 95,87\% para 0,19\%, excluindo bordas e vizinhança do evento. O resíduo é compatível com filtragem/interpolação e o ensaio não decompõe essas parcelas. Em 566 janelas puras de validação, o treino temporal alterou uma omissão no limpo para a CNN e manteve as contagens nas condições deformadas.
+
+\paragraph{E09.6: família D.} Compararam-se canônico, AWGN, modulação isolada e ganho + modulação + AWGN com 288 substituições. Modulação repetiu quase todas as contagens canônicas. O híbrido com combinação teve 16 omissões a 30 dB, contra três da referência AWGN. Em D14 e D16, o híbrido AWGN teve 4 e 0 omissões, e o combinado 5 e 1. As variantes combinadas tinham SNRs nominais entre 38,1 e 48,1 dB na validação, o que qualifica o contraste como comparação de receitas, sem isolamento de efeitos aditivos à mesma SNR.
+
+\paragraph{E09.7: adição versus repetição.} Mantiveram-se as 2.305 janelas limpas e acrescentaram-se 288, 576 ou 1.152 janelas. A 30 dB, as repetições limpas causaram 420, 416 e 420 omissões. As adições ruidosas causaram três, três e duas, com FP zero. Por volume, os braços receberam os mesmos índices adicionais e igual número de atualizações. Adicionar 288 empatou nas contagens com substituir 288, que usa menos atualizações.
+
+O conjunto expandido contém 490 arquivos, 392 de treino e 98 de validação/robustez. O estudo usou subconjuntos. Ganhos comuns, temporal + AWGN e cobertura integral das variantes continuam pendentes. A avaliação pós-retenção de 12 arquivos de validação foi incorporada no E10.3. O fechamento da análise principal de E09 a 25 kHz não implica cobertura integral dos 490.
+
+\section{E10: bateria de robustez}
+Todas as decisões dos checkpoints CNN e híbrido usam limiar de 0,5. As referências comparáveis da bateria final foram calibradas apenas no treino. Nas realizações sintéticas, o ruído é gerado sobre o registro contínuo antes do recorte, com escala por fase ajustada a partir do RMS pré-evento:
+\[
+ \sigma_p=r_{p,\mathrm{pré}}10^{-\mathrm{SNR}/20},\qquad
+ \mathrm{SNR}_{p,\mathrm{medida}}=20\log_{10}(r_{p,\mathrm{pré}}/r_{\eta,p,\mathrm{pré}}).
+\]
+O marcador serve à calibração do ensaio, sem ser acesso do modelo no momento da inferência. A correlação entre janelas permanece.
+
+\paragraph{E10.1: novas realizações a 25 kHz.} Usaram-se 50, 40, 30, 25 e 20 dB e três sementes por dose. A 30 dB, as médias de omissões foram 10,0 na CNN e 8,7 no híbrido, sem FP. A 20 dB, foram 12,7 e 6,3. Os FP médios nesse nível foram 8,0 e 2,7. O híbrido preservou melhor o compromisso entre sensibilidade e especificidade. As curvas são descritivas e não precisam ser monotônicas em um conjunto finito de realizações.
+
+\paragraph{E10.2 e E10.3: pós-retenção.} Após simular retenção por oito, a média de oito amostras por bloco preserva o valor canônico. Para amostras independentes de ruído com variância $\sigma^2$, a variância da média é $\sigma^2/8$, com aumento esperado de $10\log_{10}8\approx9,03$ dB. Esse operador é um filtro de média seguido de redução de taxa. Nas simulações, 20 dB nominais produziram 29,03 dB efetivos. Nesse ponto, as omissões médias foram 16,0 e 10,7 para CNN e híbrido. Nos 12 arquivos reais do Gate 4, a 30,02 dB medidos a 200 kHz obtiveram-se 39,07 dB na entrada de 25 kHz. Os dois pares tiveram 9/6 omissões na CNN e 6/1 no híbrido, com FP zero. Os arquivos reais cobrem o piso efetivo de cerca de 39 dB, e níveis efetivos menores pertencem ao ensaio sintético.
+
+\paragraph{E10.4--E10.6: perda do sensor B.} Forçar ABC sem B omitiu 409 janelas na CNN e 393 no híbrido em condição limpa. A alternativa AC canônica em condição limpa teve uma omissão e FP zero. Sob AWGN a 30 dB, teve zero omissões mas 130--140 FP. Com 288 substituições de AWGN em seu treino, AC passou a 14--30 omissões e 17--28 FP. A varredura com pesos fixos revelou 2--3 FP a 50 dB e 11--17 a 40 dB na AC treinada com ruído. A validação em duas origens permite propor uma faixa candidata para estudos. Um limiar prático de uso exige critério de aceitação, estimativa de qualidade em operação e confirmação fora da campanha atual.
+
+\paragraph{E10.7: comparação final com clássicos.} O limiar de RMS B foi ajustado pelo percentil 99 do RMS pré em treino. A logística clássica usa os oito descritores do E08, padronizados no treino. Ambos enfrentaram os mesmos recortes que CNN e híbrido. Aplicaram-se lacunas de 32 a cada 256 amostras com último valor observado, B presa no primeiro valor, saturação simétrica de B no P95 de módulo pré do treino, filtragem causal passa-baixa Butterworth de quarta ordem em B a 1 kHz, ganhos ABC $[1{,}15,0{,}85,1{,}10]$ e atraso de B de 40 amostras. São avaliações com decisão forçada.
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}\toprule
+Condição & RMS B & Estatísticas & CNN & Híbrido\\\midrule
+Limpa & 10/0 & 26/0 & 3/0 & 2/0\\
+Lacunas & 10/81 & 26/0 & 13/0 & 5/0\\
+B presa & 0/141 & 0/141 & 7/103 & 5/89\\
+Saturação & 11/0 & 16/0 & 41/0 & 32/0\\
+Passa-baixa & 10/0 & 27/0 & 15/0 & 6/0\\
+Ganho & 14/0 & 25/0 & 2/0 & 1/0\\
+Atraso & 10/2 & 28/0 & 5/0 & 2/0\\\bottomrule
+\end{tabular}
+\end{center}
+Cada célula informa FN/FP, com 435 positivos e 141 negativos. O híbrido foi forte em lacunas, filtragem, ganho e atraso. O RMS teve menos omissões na saturação. Canal preso gerou muitos alarmes em todos os métodos, incluindo 89 FP no híbrido. A primeira etapa de uma aplicação deve verificar integridade do sensor, selecionar modelos compatíveis e poder retornar indeterminado.
+
+\section{E11: interpretabilidade e controle de atalhos}
+O E11 analisa os checkpoints ABC com 288 substituições AWGN, sobre as janelas puras canônicas. A saliência usa $|\partial z/\partial x|$ no tensor normalizado. Para Grad-CAM, com mapas $A^k$ do último estágio e logit pós $z$:
+\[
+ \alpha_k=\frac{1}{HW}\sum_{ij}\frac{\partial z}{\partial A^k_{ij}},
+ \qquad L_{\mathrm{CAM}}=\max\!\left(0,\sum_k\alpha_kA^k\right).
+\]
+A interpolação de Grad-CAM melhora a visualização, preservando o limite de resolução dos mapas da camada. A escala por painel facilita ver padrões espaciais e impede comparar brilho diretamente entre janelas. Os mapas pré para o logit pós foram praticamente nulos nos exemplos, compatíveis com a escolha de visualizar evidência positiva para pós. Os mapas do híbrido mantiveram estatísticas fixas.
+
+Na oclusão, zerou-se no domínio normalizado uma fase, a região inferior a aproximadamente 2 kHz, ou o primeiro/último quarto de tempo. A tabela exibe FN nas 435 janelas positivas. FP foi zero nas condições apresentadas.
+\begin{center}
+\begin{tabular}{@{}lrr@{}}\toprule
+Oclusão & CNN & Híbrido\\\midrule
+Nenhuma & 3 & 2\\
+A & 6 & 4\\
+B & 409 & 390\\
+C & 3 & 1\\
+Abaixo de aproximadamente 2 kHz & 363 & 289\\
+Último quarto temporal & 67 & 49\\
+Primeiro quarto temporal & 357 & 268\\\bottomrule
+\end{tabular}
+\end{center}
+O efeito de B e da banda baixa é forte na intervenção escolhida. A assimetria temporal também é marcante. Zerar regiões pode produzir entradas fora da distribuição, e a resolução espacial da intervenção não identifica um mecanismo físico. No híbrido, as estatísticas intactas atenuam a perda sob algumas oclusões. PCA foi ajustada nos embeddings do treino canônico por SVD após centralização. PC1 explica 18,08\% e PC2, 12,59\%. O gráfico projeta as duas origens de validação nesses eixos. A projeção bidimensional representa 30,66\% da variância de treino.
+
+\textbf{Controle do relógio.} O ponto médio entre a última decisão pré e a primeira decisão pós do treino foi 1,0245 s. Esse limiar aplicado ao tempo absoluto acertou as 576 janelas puras de R03/R09. Isso comprova um atalho disponível no desenho da tarefa. As redes não recebem o tempo absoluto. O teste não demonstra que seus escores sejam causados pelo relógio, mas evidencia que a validação nominal não distingue bem um diagnóstico que generaliza de um reconhecimento de trajetória/regime. Controles sem evento, variação de posição de evento, condições e origens independentes são necessários para separar essas explicações.
+
+\section{E12: consolidação causal, custo e seleção de candidatos}
+O ensaio G5\_E12\_20261122\_165955\_385 usou os checkpoints fixos do limiar RMS B, da regressão logística sobre oito estatísticas, da CNN ResNet-18, do híbrido ABC e da CNN 1D. Todos receberam os mesmos recortes de 654 amostras a 25 kHz, com salto de 41 amostras. Em R03 e R09, avaliaram-se o sinal limpo e as três realizações AWGN a 30 dB do E10.1. Cada uma das oito sequências tem os 312 instantes do manifesto, incluindo os segmentos que cruzam o evento. As oito sequências derivam de duas origens.
+
+Cada escore usa dados disponíveis até seu instante. Os modelos aprendidos mantêm o limiar de sigmoide de 0,5, e o RMS mantém o limiar calculado no treino. Para persistência $M$, a saída começa um episódio quando se atinge $M$ decisões consecutivas acima do corte. Um episódio iniciado antes do marcador conta como falso alarme. Um novo episódio a partir do marcador conta para a latência de detecção, inclusive quando a janela cruza o evento. O marcador é usado na avaliação, sem alimentar a decisão. A latência no relógio do sinal mede o intervalo entre a primeira amostra em ou após o marcador e o início da confirmação. O tempo de CPU é medido separadamente, com a janela já disponível em memória.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}\toprule
+Método & Atraso M1 (ms) & FP M1 & Atraso M3 (ms) & FP M3 & CPU p50/p95 (ms)\\\midrule
+RMS B & 0,24--1,88 & 9 & 3,52--5,16 & 1 & 0,114 / 0,169\\
+Estatísticas & 25,88--29,76 & 0 & 29,16--33,04 & 0 & 0,735 / 1,193\\
+CNN + STFT & 12,76--21,56 & 0 & 19,32--24,84 & 0 & 31,274 / 44,204\\
+Híbrido ABC & 16,04--23,20 & 0 & 22,60--26,48 & 0 & 30,741 / 39,129\\
+CNN 1D & 20,96--24,84 & 0 & 24,24--28,12 & 0 & 1,873 / 2,247\\\bottomrule
+\end{tabular}
+\end{center}
+FP nesta tabela significa episódios iniciados antes do evento, somados nas oito sequências. Todos os métodos produziram novo alarme pós-evento nas oito sequências nas duas políticas. Os intervalos indicam extremos observados. A persistência reduziu os falsos alarmes do RMS de nove para um, com atraso adicional. Nos métodos aprendidos, nenhuma das duas políticas gerou falso episódio nesse ensaio.
+
+O custo computacional usou lote unitário, quatro threads, cinco aquecimentos e 40 medições por método. RMS e estatísticas ficaram abaixo de 1,64 ms em todas as medições. CNN 1D excedeu o período em 34 de 40. CNN com STFT e híbrido excederam em 40 de 40. A função compartilhada de extração calcula estatísticas durante a medição da CNN com STFT, ainda que sua cabeça não as utilize. O contraste de CPU mede a implementação executada. A medição não cobre entrada de hardware, filas, comunicação e garantias de tempo real. A latência em fluxo implantado não pode ser inferida diretamente quando o processamento excede a cadência de chegada.
+
+\begin{longtable}{@{}p{.23\linewidth}p{.69\linewidth}@{}}
+\toprule Tema & Evidência para o Gate 6\\\midrule\endhead
+Via rápida & RMS B detecta cedo e cabe no orçamento de processamento. A ocorrência de falsos alarmes e a fragilidade a falhas de sensor justificam usá-lo como indicador ou disparo para confirmação.\\
+Confirmação & Logística estatística é a candidata que combinou zero falsos episódios observados com custo abaixo do salto. Seu atraso confirmado foi 29,16--33,04 ms.\\
+Robustez & Híbrido ABC com 288 substituições AWGN é candidato para confirmação em cadência menor, processamento assíncrono ou após otimização. A cadência de 1,64 ms excede a capacidade da implementação atual.\\
+Modelo compacto & CNN 1D preservou zero falsos episódios no E12 e tem 77.793 parâmetros. A medição de CPU indica que ainda precisa de otimização ou ajuste de cadência.\\
+Sensores e abstinência & Verificar canal preso, saturação, lacunas e sincronismo antes de inferir. AC é candidata em faixa validada. Dados incompatíveis devem poder gerar indeterminado.\\
+Nível da evidência & A validação é exploratória em R03/R09. O E11 documentou o controle do relógio com zero erros. Avaliação externa exige trajetórias independentes, variação no instante do evento e controles sem evento. R06/R12 continuam reservados.\\
+Cobertura da expansão & Parcial. O uso de janelas e realizações não equivale a testar todos os 490 arquivos nem a obter 490 origens.\\
+\bottomrule
+\end{longtable}
+O Gate 6 pode separar a qualidade do sensor, a decisão preliminar e a confirmação. O resultado do E12 fornece candidatos e limites de implantação. Uma especificação operacional deve medir latência de aquisição e comunicação, estabelecer critérios de falso alarme e cobertura em fluxo prolongado e confirmar desempenho em dados independentes. A generalização a geometrias e regimes físicos distintos pertence ao Gate 7.
+
+\appendix
+\section{Rastreabilidade e tabelas de execução}
+As tabelas a seguir foram geradas dos JSON locais, com linhas para as condições avaliadas e suas contagens agregadas. Os caminhos relativos aos arquivos estão no pacote. Para resultados por origem, curvas por época e parâmetros específicos, consultar os JSON correspondentes. A logloss ausente para um limiar determinístico é deixada em branco. As tabelas repetem medidas de validação sob intervenções distintas e não devem ser agregadas como se fossem observações independentes.
+\input{metricas_geradas.tex}
+\clearpage
+\section{Atlas de figuras da campanha}
+As figuras foram copiadas das execuções documentadas. Elas mantêm as escalas e legendas originais. Os mapas do E11 são divididos em duas páginas para preservar a leitura. As figuras de espectrogramas individuais da campanha permanecem no diretório de pesquisa. Dois exemplos foram selecionados para contextualizar a entrada.
+\input{figuras_geradas.tex}
+\end{document}
