@@ -27,7 +27,12 @@ class Monitor:
             z=None
             r=None
             before=self.active
-            if record.jitter>.05 or record.units!="A" or any(a!="Sem alerta" for a in q):
+            if record.jitter>.05 or record.units!="A":
+                self.current="Indeterminado · grade temporal ou unidade incompatível"
+                self.cusum=self.ewma=0.
+                self.streak=0
+                self.active=False
+            elif any(a!="Sem alerta" for a in q):
                 self.current="Sensor ou aquisição inválida"
                 self.cusum=self.ewma=0.
                 self.streak=0

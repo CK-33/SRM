@@ -11,7 +11,7 @@ from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
-from signals import advanced, catalog, checked, demo, quality, spectrogram, spectrum, stats
+from signals import advanced, catalog, checked, demo, prepare_srm, quality, spectrogram, spectrum, stats
 from charts import Chart, heatmap, render
 from diagnosis import Monitor
 from neural import MODES, Neural
@@ -31,6 +31,7 @@ class App:
         self.root=root
         self.model_root=Path(model_root)
         self.record=None
+        self.representations={}
         self.monitor=None
         self.figures={}
         self.net=None
@@ -110,7 +111,13 @@ class App:
         speed.pack(side="left",padx=3)
         speed.bind("<<ComboboxSelected>>",lambda e:self.reanchor())
         self.status=tk.StringVar(value="Nenhum arquivo carregado.")
-        ttk.Label(self.body,textvariable=self.status,style="Sub.TLabel",wraplength=850).pack(anchor="w")
+        filebar=ttk.Frame(self.body,style="Work.TFrame")
+        filebar.pack(fill="x")
+        self.grade=tk.StringVar(value="Original")
+        self.grade_box=ttk.Combobox(filebar,textvariable=self.grade,state="disabled",width=22)
+        self.grade_box.pack(side="right",padx=(6,0))
+        self.grade_box.bind("<<ComboboxSelected>>",lambda _:self.switch_grade())
+        ttk.Label(filebar,textvariable=self.status,style="Sub.TLabel",wraplength=590).pack(side="left",anchor="w")
         self.progress=ttk.Progressbar(self.body,style="Accent.Horizontal.TProgressbar",maximum=100)
         self.progress.pack(fill="x",pady=(5,9))
         self.cards=ttk.Frame(self.body,style="Work.TFrame")
@@ -177,6 +184,10 @@ class App:
         units.set("A")
         units.grid(row=4,column=1,sticky="w")
         ttk.Label(frame,text="Unidades").grid(row=4,column=0,sticky="w")
+        prepare=tk.BooleanVar(value=tuple(defaults)==("results.time",
+                            *(f"results.signals[3].values[{i}]" for i in (1,2,3))))
+        ttk.Checkbutton(frame,text="Preparar grade SRM de 200 kHz e verificar retenção para IA",
+                        variable=prepare).grid(row=5,column=0,columnspan=2,sticky="w",pady=4)
         def commit():
             keys=[v.get() for v in bindings]
             if any(k not in values for k in keys) or len(set(keys))!=4:
@@ -190,10 +201,37 @@ class App:
                 return
             dialog.destroy()
             signal.mapping=tuple(keys)
-            self.load(signal)
-        ttk.Button(frame,text="Aplicar associação",command=commit).grid(row=5,column=1,sticky="e",pady=9)
+            self.load(signal,prepare.get())
+        ttk.Button(frame,text="Aplicar associação",command=commit).grid(row=6,column=1,sticky="e",pady=9)
 
-    def load(self,record):
+    def load(self,record,prepare=False):
+        self.representations={"Original":record}
+        selected="Original"
+        warning=None
+        if prepare:
+            try:
+                regular,canonical=prepare_srm(record)
+                self.representations["Regular · 200 kHz"]=regular
+                selected="Regular · 200 kHz"
+                if canonical is not None:
+                    selected="Canônica · 25 kHz"
+                    self.representations[selected]=canonical
+                else:
+                    warning="Grade regular disponível. Retenção exata por 8 não confirmada. IA a 25 kHz indisponível."
+            except ValueError as error:
+                warning=str(error)
+        self.grade_box.configure(values=list(self.representations),
+                                 state="readonly" if len(self.representations)>1 else "disabled")
+        self.grade.set(selected)
+        self.switch_grade()
+        if warning:
+            self.footer.set(warning)
+            self.info.set(self.info.get()+"\nPreparação: "+warning)
+
+    def switch_grade(self):
+        record=self.representations.get(self.grade.get())
+        if record is None:
+            return
         self.generation+=1
         self.record=record
         self.figures={}
@@ -205,6 +243,7 @@ class App:
         self.interval=None
         self.monitor=None
         self.monitor_busy=False
+        self.footer.set(record.preparation)
         self.render()
 
     def select(self,index):
@@ -307,6 +346,7 @@ class App:
         valid=np.isfinite(cut.current).all()
         state=self.monitor.current if self.monitor else "Análise de diagnóstico ainda não executada"
         detail=f"Sensores A/B/C: {' / '.join(self.monitor.q if self.monitor and self.replay else q)} · {jitter}"
+        detail+=f"\n{r.preparation}"
         card=["—"]*4+[str(len(self.monitor.events)) if self.monitor else "—"]
         if valid and r.jitter<=.05:
             s=stats(cut.current,r.fs)
@@ -324,7 +364,7 @@ class App:
                 detail+=f" · escore pós {self.net_value:.3f} em {self.net_clock:.5f} s · proxy temporal"
                 stale=float(r.time[end-1])-self.net_clock>max(.15,.15*float(self.speed.get().rstrip("×")))
                 if self.monitor:
-                    if stale or "inválida" in state or "insuficientes" in state:
+                    if stale or "inválida" in state or "insuficientes" in state or "Indeterminado" in state:
                         detail+="\nDecisão cooperativa: indeterminado."
                     elif (self.net_value>=.5)==self.monitor.active:
                         detail+="\nDecisão cooperativa: concordância entre detector e IA."
@@ -336,8 +376,10 @@ class App:
         for value,new in zip(self.card_values,card):value.set(new)
         plot=self.plot_type
         if plot!="Correntes" and plot!="Mudanças" and (not valid or r.jitter>.05):
-            self.footer.set("A análise requer amostras válidas em uma grade aproximadamente uniforme.")
-            plot="Correntes"
+            hint="Dados não finitos no intervalo." if not valid else "Selecione uma grade regular para esta análise."
+            self.chart.empty(f"{plot} indisponível. {hint}")
+            self.info.set(detail+"\n"+hint)
+            return
         if plot=="Mudanças" and not (self.monitor and len(self.monitor.history)>1):
             plot="Correntes"
         history=list(self.monitor.history) if self.monitor else []
@@ -437,6 +479,10 @@ class App:
     def infer(self,end):
         if self.net is None or getattr(self,"ai_busy",False) or end<654:return
         rec=self.record
+        if abs(rec.fs-25000)>.1 or rec.jitter>.001 or rec.units!="A":
+            self.net_value=None
+            self.footer.set("IA indisponível nesta grade. Use a grade canônica de 25 kHz, com correntes em A.")
+            return
         model=self.net
         token=self.generation
         self.ai_busy=True
@@ -580,6 +626,7 @@ class App:
         lines=[f"Máquina: {self.machine.get()}",f"Fonte: {self.record.name}",
                f"Faixa exibida: {r.time[0]:.6f} a {r.time[-1]:.6f} s",
                f"Taxa estimada: {r.fs:.6f} Hz · unidade: {r.units} · irregularidade: {r.jitter:.2%}",
+               f"Preparação temporal: {r.preparation}",
                "Associação tempo / A / B / C: "+(" / ".join(r.mapping) if r.mapping else "demonstrativo interno"),
                *self.info.get().splitlines(),"Método: RMS causal, CUSUM/EWMA e confirmação de três decisões.",
                "Referência inicial: 125 ms do intervalo ou do replay. Presume regime inicial estável.",

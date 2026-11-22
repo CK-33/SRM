@@ -15,9 +15,11 @@ class Record:
     units: str
     jitter: float
     mapping: tuple = ()
+    preparation: str = "Grade original"
 
     def cut(self, a, b):
-        return Record(self.time[a:b], self.current[a:b], self.name, self.fs, self.units, self.jitter, self.mapping)
+        return Record(self.time[a:b], self.current[a:b], self.name, self.fs, self.units,
+                      self.jitter, self.mapping, self.preparation)
 
 
 def checked(t, x, name, units="A"):
@@ -28,10 +30,47 @@ def checked(t, x, name, units="A"):
     if len(t) < 8 or x.shape != (len(t), 3):
         raise ValueError("É necessário um vetor de tempo e três correntes de mesmo comprimento.")
     dt = np.diff(t)
-    if not np.isfinite(t).all() or np.any(dt <= 0):
-        raise ValueError("Timestamps devem ser finitos e estritamente crescentes.")
-    step = float(np.median(dt))
+    if not np.isfinite(t).all() or np.any(dt < 0) or not np.any(dt > 0):
+        raise ValueError("Timestamps devem ser finitos, não decrescentes e cobrir um intervalo positivo.")
+    step = float(np.median(dt[dt > 0]))
     return Record(t, x, name, 1/step, units, float(np.max(abs(dt-step))/step))
+
+
+def prepare_srm(original):
+    """Reproduz a grade do G4 e só aceita redução com reconstrução ZOH exata."""
+    fs = 200_000
+    if abs(original.fs/fs-1) > .02:
+        raise ValueError("A preparação SRM exige uma taxa nominal próxima de 200 kHz.")
+    if not np.isfinite(original.current).all():
+        raise ValueError("A preparação SRM exige correntes finitas nos três canais.")
+    t0 = original.time[0]
+    exact = (original.time-t0)*fs
+    indices = np.rint(exact).astype(np.int64)
+    n = int(indices[-1])+1
+    if n < 8 or n > len(original.time):
+        raise ValueError("Grade SRM incompleta. Nenhuma lacuna foi interpolada.")
+    keep = (indices>=0)&(indices<n)&(np.abs(exact-indices)<=.001+1e-9)
+    grid = np.full(n,-1,dtype=np.int64)
+    np.maximum.at(grid, indices[keep], np.flatnonzero(keep))
+    missing = int(np.count_nonzero(grid<0))
+    if missing:
+        raise ValueError(f"Grade SRM incompleta: {missing} pontos ausentes. Nenhuma lacuna foi interpolada.")
+    out = original.current[grid]
+    outside = len(keep)-int(keep.sum())
+    collisions = int(keep.sum())-n
+    note = f"Grade regular de 200 kHz · {outside} fora da grade · {collisions} colisões"
+    regular = Record(t0+np.arange(n)/fs,out,original.name,fs,original.units,0.,original.mapping,note)
+    canonical = None
+    if n%8==0:
+        blocks = out.reshape(-1,8,3)
+        values = blocks[:,0]
+        # Exige também pelo menos uma atualização de valor no registro.
+        if (np.array_equal(blocks,np.broadcast_to(values[:,None,:],blocks.shape))
+                and np.any(np.diff(values,axis=0)!=0)):
+            canonical = Record(regular.time[::8],values.copy(),original.name,25000,
+                               original.units,0.,original.mapping,
+                               "Grade canônica de 25 kHz · retenção exata por 8 verificada")
+    return regular, canonical
 
 
 def catalog(path):

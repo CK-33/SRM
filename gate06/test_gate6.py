@@ -11,12 +11,30 @@ from charts import render, heatmap
 from diagnosis import Monitor
 from neural import MODES, Neural
 from reports import export_csv, export_pdf
-from signals import advanced, catalog, checked, demo, quality, spectrum, spectrogram, stats
+from signals import advanced, catalog, checked, demo, prepare_srm, quality, spectrum, spectrogram, stats
 
 MODEL_ROOT=None
 
 
 class Campaign(unittest.TestCase):
+    def test_prepare_srm_requires_complete_grid_and_exact_retention(self):
+        x=demo().current[:100]
+        retained=np.repeat(x,8,axis=0)
+        t=np.arange(len(retained))/200000
+        t_extra=np.insert(t,11,[t[10],t[10]+1e-6])
+        extra=np.insert(retained,11,[retained[10],retained[10]],axis=0)
+        regular,canonical=prepare_srm(checked(t_extra,extra,"sintético"))
+        np.testing.assert_array_equal(regular.current,retained)
+        np.testing.assert_array_equal(canonical.current,x)
+        self.assertEqual(canonical.fs,25000)
+        with self.assertRaisesRegex(ValueError,"incompleta"):
+            prepare_srm(checked(np.delete(t,15),np.delete(retained,15,axis=0),"lacuna"))
+        broken=retained.copy()
+        broken[11,1]+=.01
+        bounded,canonical=prepare_srm(checked(t,broken,"sem retenção"))
+        self.assertEqual(bounded.fs,200000)
+        self.assertIsNone(canonical)
+
     def test_io_processing_export(self):
         r=demo()
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
